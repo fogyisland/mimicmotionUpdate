@@ -520,7 +520,6 @@ class MimicMotionPipeline(DiffusionPipeline):
         )
         image_latents = image_latents.to(image_embeddings.dtype)
 
-        ref_latent = first_n_frames[:, 0] if first_n_frames is not None else None
         pose_latents = self._encode_pose_image(
             image_pose, do_classifier_free_guidance=self.do_classifier_free_guidance,
         )
@@ -577,10 +576,20 @@ class MimicMotionPipeline(DiffusionPipeline):
         # 8. Denoising loop
         self._num_timesteps = len(timesteps)
         pose_latents = einops.rearrange(pose_latents, '(b f) c h w -> b f c h w', f=num_frames)
-        indices = [[0, *range(i + 1, min(i + tile_size, num_frames))] for i in
-                   range(0, num_frames - tile_size + 1, tile_size - tile_overlap)]
-        if indices[-1][-1] < num_frames - 1:
-            indices.append([0, *range(num_frames - tile_size + 1, num_frames)])
+        # Build the list of frame-index ranges that each unet call covers.
+        # The original range expression produced an empty list whenever
+        # `num_frames < tile_size`, which then raised IndexError on
+        # `indices[-1]`. Guard against that case explicitly.
+        if num_frames >= tile_size:
+            indices = [
+                [0, *range(i + 1, min(i + tile_size, num_frames))]
+                for i in range(0, num_frames - tile_size + 1, tile_size - tile_overlap)
+            ]
+            if indices[-1][-1] < num_frames - 1:
+                indices.append([0, *range(num_frames - tile_size + 1, num_frames)])
+        else:
+            # Short video: denoise everything in a single tile.
+            indices = [list(range(0, num_frames))]
 
         # Hoist tensors that don't depend on `t` out of the timestep loop.
         # Re-creating them every iteration wastes allocations and adds

@@ -24,6 +24,12 @@ def get_video_pose(
     ref_keypoint_id = [0, 1, 2, 5, 8, 11, 14, 15, 16, 17]
     ref_keypoint_id = [i for i in ref_keypoint_id \
         if ref_pose['bodies']['score'].shape[0] > 0 and ref_pose['bodies']['score'][0][i] > 0.3]
+    if not ref_keypoint_id:
+        raise RuntimeError(
+            "DWPose failed to detect the required keypoints (head/shoulders/"
+            "hips/limbs) on the reference image. Please use a clearer image "
+            "where the subject is fully visible from the front."
+        )
     ref_body = ref_pose['bodies']['candidate'][ref_keypoint_id]
 
     height, width, _ = ref_image.shape
@@ -37,13 +43,26 @@ def get_video_pose(
     detected_bodies = np.stack(
         [p['bodies']['candidate'] for p in detected_poses if p['bodies']['candidate'].shape[0] == 18])[:,
                       ref_keypoint_id]
-    # compute linear-rescale params
-    ay, by = np.polyfit(detected_bodies[:, :, 1].flatten(), np.tile(ref_body[:, 1], len(detected_bodies)), 1)
-    fh, fw, _ = vr[0].shape
-    ax = ay / (fh / fw / height * width)
-    bx = np.mean(np.tile(ref_body[:, 0], len(detected_bodies)) - detected_bodies[:, :, 0].flatten() * ax)
-    a = np.array([ax, ay])
-    b = np.array([bx, by])
+    # Guard against the empty case: pose detection can fail on some frames
+    # (motion blur, occlusion, etc.), leaving `detected_bodies` empty.
+    # np.polyfit on empty arrays would raise, so we fall back to an
+    # identity rescale (a=1, b=0) and continue with whatever poses were
+    # detected.
+    if detected_bodies.size == 0 or len(detected_bodies) < 2:
+        print(
+            "[ComfyUI-MimicMotion] DWPose detected fewer than 2 usable frames; "
+            "skipping pose rescale."
+        )
+        a = np.array([1.0, 1.0])
+        b = np.array([0.0, 0.0])
+    else:
+        # compute linear-rescale params
+        ay, by = np.polyfit(detected_bodies[:, :, 1].flatten(), np.tile(ref_body[:, 1], len(detected_bodies)), 1)
+        fh, fw, _ = vr[0].shape
+        ax = ay / (fh / fw / height * width)
+        bx = np.mean(np.tile(ref_body[:, 0], len(detected_bodies)) - detected_bodies[:, :, 0].flatten() * ax)
+        a = np.array([ax, ay])
+        b = np.array([bx, by])
     output_pose = []
     # pose rescale 
     for detected_pose in detected_poses:
