@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import inspect
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Union
@@ -10,8 +12,9 @@ from diffusers.image_processor import VaeImageProcessor, PipelineImageInput
 from diffusers.models import AutoencoderKLTemporalDecoder, UNetSpatioTemporalConditionModel
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import retrieve_timesteps
-from diffusers.pipelines.stable_video_diffusion.pipeline_stable_video_diffusion \
-    import _resize_with_antialiasing, _append_dims
+from diffusers.pipelines.stable_video_diffusion.pipeline_stable_video_diffusion import (
+    _resize_with_antialiasing,
+)
 from diffusers.schedulers import EulerDiscreteScheduler
 from diffusers.utils import BaseOutput, logging
 from diffusers.utils.torch_utils import is_compiled_module, randn_tensor
@@ -23,7 +26,11 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
 def _append_dims(x, target_dims):
-    """Appends dimensions to the end of a tensor until it has target_dims dimensions."""
+    """Appends dimensions to the end of a tensor until it has target_dims dimensions.
+
+    NOTE: This shadows `_append_dims` imported from diffusers in earlier versions.
+    It is kept here because some diffusers releases removed that import.
+    """
     dims_to_append = target_dims - x.ndim
     if dims_to_append < 0:
         raise ValueError(f"input has {x.ndim} dims but target_dims is {target_dims}, which is less")
@@ -322,10 +329,12 @@ class MimicMotionPipeline(DiffusionPipeline):
     # corresponds to doing no classifier free guidance.
     @property
     def do_classifier_free_guidance(self):
-        return True # TODO
-        if isinstance(self.guidance_scale, (int, float)):
-            return self.guidance_scale
-        return self.guidance_scale.max() > 1
+        # Must return a bool. Returning the raw scalar would make the
+        # `if self.do_classifier_free_guidance:` branches elsewhere in this
+        # module behave incorrectly.
+        if isinstance(self._guidance_scale, (int, float)):
+            return self._guidance_scale > 1
+        return self._guidance_scale.max() > 1
 
     @property
     def num_timesteps(self):
@@ -573,6 +582,15 @@ class MimicMotionPipeline(DiffusionPipeline):
         if indices[-1][-1] < num_frames - 1:
             indices.append([0, *range(num_frames - tile_size + 1, num_frames)])
 
+        # Hoist tensors that don't depend on `t` out of the timestep loop.
+        # Re-creating them every iteration wastes allocations and adds
+        # CPU<->GPU sync points in PyTorch 2.x.
+        noise_pred = torch.zeros_like(image_latents)
+        noise_pred_cnt = image_latents.new_zeros((num_frames,))
+        arange = torch.arange(tile_size, device=device, dtype=image_latents.dtype)
+        weight = (arange + 0.5) * 2.0 / tile_size
+        weight = torch.minimum(weight, 2 - weight)
+
         with self.progress_bar(total=len(timesteps) * len(indices)) as progress_bar:
             for i, t in enumerate(timesteps):
                 # expand the latents if we are doing classifier free guidance
@@ -582,12 +600,10 @@ class MimicMotionPipeline(DiffusionPipeline):
                 # Concatenate image_latents over channels dimension
                 latent_model_input = torch.cat([latent_model_input, image_latents], dim=2)
 
-                # predict the noise residual
-                noise_pred = torch.zeros_like(image_latents)
-                noise_pred_cnt = image_latents.new_zeros((num_frames,))
+                # Reset accumulators in-place rather than reallocating.
+                noise_pred.zero_()
+                noise_pred_cnt.zero_()
                 # image_pose = pixel_values_pose[:, frame_start:frame_start + self.num_frames, ...]
-                weight = (torch.arange(tile_size, device=device) + 0.5) * 2. / tile_size
-                weight = torch.minimum(weight, 2 - weight)
                 for idx in indices:
                     _noise_pred = self.unet(
                         latent_model_input[:, idx],
@@ -609,7 +625,13 @@ class MimicMotionPipeline(DiffusionPipeline):
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                 if first_n_frames is not None:
-                    sigma = self.scheduler.sigmas[self.scheduler.step_index]
+                    # `scheduler.step_index` was removed in newer diffusers versions in favor of
+                    # `index_for_timestep`. Support both for compatibility.
+                    if hasattr(self.scheduler, "index_for_timestep"):
+                        step_index = self.scheduler.index_for_timestep(t)
+                    else:
+                        step_index = self.scheduler.step_index
+                    sigma = self.scheduler.sigmas[step_index]
                     _latents = latents[:, 1:1 + first_n_frames.size(1)]
                     tmp = (first_n_frames - _latents / (sigma ** 2 + 1)) / (-sigma / ((sigma ** 2 + 1) ** 0.5))
                     noise_pred[:, 1:1 + first_n_frames.size(1)] = tmp

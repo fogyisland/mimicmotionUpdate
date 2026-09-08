@@ -10,8 +10,8 @@ import torch.nn.init as init
 class PoseNet(nn.Module):
     """a tiny conv network for introducing pose sequence as the condition
     """
-    def __init__(self, noise_latent_channels=320, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, noise_latent_channels=320):
+        super().__init__()
         # multiple convolution layers
         self.conv_layers = nn.Sequential(
             nn.Conv2d(in_channels=3, out_channels=3, kernel_size=3, padding=1),
@@ -68,11 +68,23 @@ class PoseNet(nn.Module):
     def from_pretrained(cls, pretrained_model_path):
         """load pretrained pose-net weights
         """
-        if not Path(pretrained_model_path).exists():
-            print(f"There is no model file in {pretrained_model_path}")
+        model_path = Path(pretrained_model_path)
+        if not model_path.exists():
+            # Don't silently fall through and torch.load a missing file later.
+            raise FileNotFoundError(
+                f"PoseNet checkpoint not found at {pretrained_model_path}"
+            )
         print(f"loaded PoseNet's pretrained weights from {pretrained_model_path}.")
 
-        state_dict = torch.load(pretrained_model_path, map_location="cpu")
+        # `weights_only=True` is the safe default in PyTorch 2.x; fall back
+        # for older releases that don't accept the kwarg.
+        try:
+            state_dict = torch.load(
+                pretrained_model_path, map_location="cpu", weights_only=True,
+            )
+        except TypeError:
+            state_dict = torch.load(pretrained_model_path, map_location="cpu")
+
         model = PoseNet(noise_latent_channels=320)
 
         model.load_state_dict(state_dict, strict=True)

@@ -307,7 +307,12 @@ class TransformerSpatioTemporalModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         inner_dim = hidden_states.shape[1]
         hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch_frames, height * width, inner_dim)
-        hidden_states = torch.utils.checkpoint.checkpoint(self.proj_in, hidden_states)
+        # proj_in is a small linear layer; checkpointing it just adds overhead during inference
+        # without saving memory. Only wrap it when gradient checkpointing is enabled.
+        if self.gradient_checkpointing and self.training:
+            hidden_states = torch.utils.checkpoint.checkpoint(self.proj_in, hidden_states, use_reentrant=False)
+        else:
+            hidden_states = self.proj_in(hidden_states)
 
         num_frames_emb = torch.arange(num_frames, device=hidden_states.device)
         num_frames_emb = num_frames_emb.repeat(batch_size, 1)
@@ -348,6 +353,7 @@ class TransformerSpatioTemporalModel(nn.Module):
                     hidden_states_mix,
                     num_frames,
                     time_context,
+                    use_reentrant=False,
                 )
                 hidden_states = self.time_mixer(
                     x_spatial=hidden_states,
@@ -367,7 +373,11 @@ class TransformerSpatioTemporalModel(nn.Module):
                 )
 
         # 3. Output
-        hidden_states = torch.utils.checkpoint.checkpoint(self.proj_out, hidden_states)
+        # Same reasoning as proj_in: only checkpoint the output projection when training.
+        if self.gradient_checkpointing and self.training:
+            hidden_states = torch.utils.checkpoint.checkpoint(self.proj_out, hidden_states, use_reentrant=False)
+        else:
+            hidden_states = self.proj_out(hidden_states)
         hidden_states = hidden_states.reshape(batch_frames, height, width, inner_dim).permute(0, 3, 1, 2).contiguous()
 
         output = hidden_states + residual

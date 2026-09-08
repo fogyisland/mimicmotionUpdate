@@ -8,14 +8,15 @@ from .wholebody import Wholebody
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
 class DWposeDetector:
     """
     A pose detect method for image-like data.
 
     Parameters:
-        model_det: (str) serialized ONNX format model path, 
+        model_det: (str) serialized ONNX format model path,
                     such as https://huggingface.co/yzd-v/DWPose/blob/main/yolox_l.onnx
-        model_pose: (str) serialized ONNX format model path, 
+        model_pose: (str) serialized ONNX format model path,
                     such as https://huggingface.co/yzd-v/DWPose/blob/main/dw-ll_ucoco_384.onnx
         device: (str) 'cpu' or 'cuda:{device_id}'
     """
@@ -59,7 +60,40 @@ class DWposeDetector:
             return pose
 
 
-dwpose_detector = DWposeDetector(
-    model_det=os.path.join(os.environ["dwpose"],"yolox_l.onnx"),
-    model_pose=os.path.join(os.environ["dwpose"],"dw-ll_ucoco_384.onnx"),
-    device=device)
+# Lazy singleton: defer model instantiation until first use so the module can
+# be imported without the `dwpose` env var set. This means callers that don't
+# actually run pose detection (e.g. ComfyUI loading the plugin's node list)
+# won't crash on import.
+_dwpose_detector_singleton = None
+
+
+def _get_dwpose_detector():
+    global _dwpose_detector_singleton
+    if _dwpose_detector_singleton is None:
+        if "dwpose" not in os.environ:
+            raise RuntimeError(
+                "Environment variable `dwpose` is not set. The MimicMotion "
+                "plugin sets it automatically on import; if you are calling "
+                "this module directly, export it to the DWPose weights "
+                "directory before importing."
+            )
+        dwpose_dir = os.environ["dwpose"]
+        _dwpose_detector_singleton = DWposeDetector(
+            model_det=os.path.join(dwpose_dir, "yolox_l.onnx"),
+            model_pose=os.path.join(dwpose_dir, "dw-ll_ucoco_384.onnx"),
+            device=device,
+        )
+    return _dwpose_detector_singleton
+
+
+class _LazyDWposeDetector:
+    """Proxy that forwards attribute access and calls to the lazy singleton."""
+
+    def __call__(self, *args, **kwargs):
+        return _get_dwpose_detector()(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(_get_dwpose_detector(), name)
+
+
+dwpose_detector = _LazyDWposeDetector()

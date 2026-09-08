@@ -1,6 +1,7 @@
 import math
 import numpy as np
-import matplotlib
+import matplotlib  # noqa: F401  -- imported for side effects / version pin
+import matplotlib.colors  # needed for hsv_to_rgb in draw_handpose
 import cv2
 
 
